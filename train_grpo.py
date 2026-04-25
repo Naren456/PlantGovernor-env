@@ -53,7 +53,7 @@ OUTPUT_DIR = "./plantguard-grpo-output"
 NUM_TRAIN_SAMPLES = 500   # Number of training prompts
 NUM_GENERATIONS = 4        # Completions per prompt for GRPO
 TRAINING_STEPS = 150       # Total training steps
-BATCH_SIZE = 1             # Per-device batch size (small for 6GB)
+BATCH_SIZE = 1             # Per-device batch size
 GRAD_ACCUM = 4             # Effective batch = 1 * 4 = 4
 LEARNING_RATE = 5e-6
 MAX_NEW_TOKENS = 300       # Max tokens for model generation
@@ -198,8 +198,10 @@ def create_training_dataset(df: pd.DataFrame, n_samples: int) -> Dataset:
 # 2. Reward Function
 # =============================================================================
 
-def score_reasoning(reasoning: str) -> float:
+def score_reasoning(reasoning) -> float:
     """Score reasoning text for domain-relevant keywords (0-350)."""
+    if not reasoning or not isinstance(reasoning, str):
+        return 0.0
     text = reasoning.lower()
     score = 0
     for keyword, value in REASONING_KEYWORDS.items():
@@ -240,8 +242,8 @@ def compute_reward(completion: str, torque: float, tool_wear: float,
     try:
         data = json.loads(text)
         tool = data.get("tool", "")
-        reasoning = data.get("reasoning", "")
-    except (json.JSONDecodeError, ValueError):
+        reasoning = data.get("reasoning", "") or ""
+    except (json.JSONDecodeError, ValueError, TypeError):
         # Invalid JSON: heavy penalty
         return -200.0
 
@@ -374,7 +376,7 @@ def main():
     # ── Check GPU ──────────────────────────────────────────────────────
     if torch.cuda.is_available():
         gpu = torch.cuda.get_device_name(0)
-        mem = torch.cuda.get_device_properties(0).total_mem / 1024**3
+        mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
         print(f"  GPU: {gpu} ({mem:.1f} GB)")
     else:
         print("  ⚠️  No GPU detected — training will be very slow!")
@@ -398,7 +400,7 @@ def main():
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_dropout=0.05,
+        lora_dropout=0.05,  # Small dropout for regularization
         bias="none",
         use_gradient_checkpointing="unsloth",
         random_state=42,
