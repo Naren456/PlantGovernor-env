@@ -1,0 +1,7 @@
+spec_version: 1
+name: plant_governor_env
+type: space
+runtime: fastapi
+app: server.app:app
+environment: server.plant_governor_env_environment:PlantGovernorEnvironment
+port: 8000
