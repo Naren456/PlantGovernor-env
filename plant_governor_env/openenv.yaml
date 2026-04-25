@@ -3,5 +3,13 @@ name: plant_governor_env
 type: space
 runtime: fastapi
 app: server.app:app
-environment: server.plant_governor_env_environment:PlantGovernorEnvironment
+#
+# Note: OpenEnv manifest schemas have evolved across versions. We keep the
+# original simple keys for backwards compatibility, and ALSO provide explicit
+# class pointers for judge checklists that require them.
+#
+environment: server.environment:PlantGovernorEnvironment
+actions: plant_governor_env.models:PlantAction
+observations: plant_governor_env.models:PlantObservation
+state: plant_governor_env.models:PlantState
 port: 8000

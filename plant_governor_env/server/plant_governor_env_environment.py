@@ -48,6 +48,10 @@ COST_DIAGNOSTIC = 200.0
 COST_REPAIR = 1500.0
 COST_SPARE = 100.0
 
+# Downtime mechanics
+DOWNTIME_HOURS_NO_SPARE = 2
+REWARD_DOWNTIME_PER_HOUR = -10.0
+
 # Reward components
 REWARD_SHIFT_COMPLETE = 1000.0
 REWARD_CASCADE = -5000.0
@@ -205,6 +209,7 @@ class PlantGovernorEnvironment(Environment):
         self._done: bool = False
         self._last_action: Optional[str] = None
         self._last_state_changed: bool = False  # Track if last action caused a state change
+        self._downtime_remaining: int = 0
 
     # ─────────────────────────────────────────────────────────────────────
     # Reset
@@ -250,8 +255,9 @@ class PlantGovernorEnvironment(Environment):
         self._done = False
         self._last_action = None
         self._last_state_changed = False
+        self._downtime_remaining = 0
 
-        return self._get_observation(reward=0.0, done=False)
+        return self._get_observation()
 
     # ─────────────────────────────────────────────────────────────────────
     # Step
@@ -262,7 +268,7 @@ class PlantGovernorEnvironment(Environment):
         action: PlantAction,  # type: ignore[override]
         timeout_s: Optional[float] = None,
         **kwargs: Any,
-    ) -> PlantObservation:
+    ) -> dict:
         """
         Execute one step in the environment.
 
@@ -278,16 +284,49 @@ class PlantGovernorEnvironment(Environment):
             timeout_s: Ignored (for API compatibility).
 
         Returns:
-            PlantObservation with sensor data, reward, done status, and info metadata.
+            Dict compatible with OpenEnv server expectations:
+              {"observation": PlantObservation, "reward": float, "done": bool, "info": dict}
         """
         if self._done:
-            return self._get_observation(reward=0.0, done=True)
+            return {
+                "observation": self._get_observation(),
+                "reward": 0.0,
+                "done": True,
+                "info": {"already_done": True},
+            }
 
         tool = action.tool
         reasoning = action.reasoning or ""
+        info: dict[str, Any] = {}
+
+        # ── 0. Downtime handling ───────────────────────────────────────
+        # If a repair caused downtime, production is halted and the agent cannot
+        # meaningfully act. We still advance time and apply a penalty.
+        if self._downtime_remaining > 0:
+            self._downtime_remaining -= 1
+            reward = REWARD_SURVIVAL_PER_STEP + REWARD_DOWNTIME_PER_HOUR
+            self._step += 1
+
+            if self._step >= EPISODE_LENGTH:
+                self._shift_complete = True
+                self._done = True
+
+            info.update(
+                {
+                    "downtime": True,
+                    "downtime_remaining": self._downtime_remaining,
+                    "effective_action": "downtime_wait",
+                }
+            )
+            return {
+                "observation": self._get_observation(),
+                "reward": reward,
+                "done": self._done,
+                "info": info,
+            }
 
         # ── 1. Deduct action cost ──────────────────────────────────────
-        cost = self._get_action_cost(tool)
+        cost = self._get_action_cost(tool, spare_available=self._spare_available)
         effective_action = tool
         state_changed = False
 
@@ -307,11 +346,18 @@ class PlantGovernorEnvironment(Environment):
             if self._spare_available:
                 self._spare_available = False
                 self._spare_used = True
+                info["repair_cost_waived_by_spare"] = True
             state_changed = True  # Repair always counts as state change
+            # If no spare was used, the repair causes downtime.
+            if not info.get("repair_cost_waived_by_spare", False):
+                self._downtime_remaining = DOWNTIME_HOURS_NO_SPARE
+                info["downtime_triggered_hours"] = DOWNTIME_HOURS_NO_SPARE
         elif effective_action == "adjust_load":
             state_changed = True  # Load adjustment always counts as state change
         elif effective_action == "run_diagnostic":
             state_changed = True  # Diagnostic reveals new info
+            # Reveal a diagnostic score (placeholder; can be made data-driven later).
+            info["diagnostic_failure_risk_pct"] = int(np.random.randint(0, 101))
 
         # ── 3. Check failure ───────────────────────────────────────────
         row_idx = self._start_idx + self._step
@@ -351,7 +397,24 @@ class PlantGovernorEnvironment(Environment):
                 else:
                     reward += REWARD_SPARE_WASTED
 
-        return self._get_observation(reward=reward, done=self._done)
+        info.update(
+            {
+                "step": self._step,
+                "effective_action": effective_action,
+                "cascade_occurred": self._cascade_occurred,
+                "shift_complete": self._shift_complete,
+                "spare_available": self._spare_available,
+                "budget_remaining": round(self._budget, 2),
+                "downtime_remaining": self._downtime_remaining,
+            }
+        )
+
+        return {
+            "observation": self._get_observation(),
+            "reward": float(reward),
+            "done": bool(self._done),
+            "info": info,
+        }
 
     # ─────────────────────────────────────────────────────────────────────
     # State
@@ -378,16 +441,12 @@ class PlantGovernorEnvironment(Environment):
     # Private Helpers
     # ─────────────────────────────────────────────────────────────────────
 
-    def _get_observation(self, reward: float, done: bool) -> PlantObservation:
+    def _get_observation(self) -> PlantObservation:
         """
         Build observation from ONLY the current step's data.
 
         Memory constraint: NO past failures, NO action history, NO
         historical sensor readings. Only the current row + budget.
-
-        Args:
-            reward: Reward for this step.
-            done: Whether the episode is over.
 
         Returns:
             PlantObservation with current sensor data and budget.
@@ -403,19 +462,18 @@ class PlantGovernorEnvironment(Environment):
             tool_wear=float(row["Tool wear [min]"]),
             shift_hour=int(self._step % 24),
             remaining_budget=round(self._budget, 2),
-            done=done,
-            reward=reward,
             metadata={
                 "step": self._step,
                 "cascade_occurred": self._cascade_occurred,
                 "shift_complete": self._shift_complete,
                 "spare_available": self._spare_available,
                 "budget_remaining": round(self._budget, 2),
+                "downtime_remaining": self._downtime_remaining,
             },
         )
 
     @staticmethod
-    def _get_action_cost(tool: str) -> float:
+    def _get_action_cost(tool: str, spare_available: bool) -> float:
         """Return the dollar cost of a given tool."""
         costs = {
             "run_diagnostic": COST_DIAGNOSTIC,
@@ -424,6 +482,8 @@ class PlantGovernorEnvironment(Environment):
             "order_spare_part": COST_SPARE,
             "do_nothing": 0.0,
         }
+        if tool == "dispatch_repair" and spare_available:
+            return 0.0
         return costs.get(tool, 0.0)
 
     def _compute_reward(

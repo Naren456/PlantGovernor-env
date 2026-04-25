@@ -178,6 +178,43 @@ openenv push
 
 The untrained Qwen 2.5 earns **112× more reward** than random, mostly through reasoning bonuses. However, it uses `adjust_load` 96% of the time and never orders spares or runs diagnostics strategically — demonstrating clear room for RL improvement.
 
+## Training & Evidence Artifacts (Judging)
+
+This repo includes a **re-runnable, end-to-end online rollout logger** against the deployed Hugging Face Space. It writes an episode-level CSV and produces the required plots.
+
+### 1) Collect episode logs from the deployed Space
+
+```bash
+python -m plant_governor_env.train_online_ppo \
+  --base-url "https://narendra78-plant-governor-env.hf.space" \
+  --episodes 100 \
+  --max-steps 720 \
+  --out episode_log.csv
+```
+
+Optionally, if you have Ollama running locally:
+
+```bash
+python -m plant_governor_env.train_online_ppo \
+  --base-url "https://narendra78-plant-governor-env.hf.space" \
+  --episodes 50 \
+  --max-steps 200 \
+  --ollama-model "qwen2.5:7b" \
+  --out episode_log.csv
+```
+
+### 2) Generate plots from `episode_log.csv`
+
+```bash
+python -m plant_governor_env.plot_episode_log --csv episode_log.csv
+```
+
+This writes:
+- `reward_curve.png`
+- `success_rate.png`
+- `baseline_comparison.png` (only if your CSV includes a `policy` column)
+- `reasoning_improvement.png` (only if your CSV includes a `reasoning_score` column)
+
 ## Project Structure
 
 ```
